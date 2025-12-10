@@ -1,0 +1,98 @@
+import express from "express";
+import supabase from "../lib/supabase.js";
+import { authMiddleware } from "../middleware/auth.js";
+import { normalizeUrl } from "../utils/normalizeUrl.js";
+import { hashUrl } from "../utils/hashUrl.js";
+import { getLocalCache, setLocalCache } from "../utils/cache.js";
+import { scrapeOffer } from "../utils/scraper.js";
+
+const router = express.Router();
+
+router.post("/", authMiddleware, async (req, res) => {
+  try {
+    const { url } = req.body;
+    const userId = req.user.id;
+
+    if (!url) return res.status(400).json({ error: "missing_url" });
+
+    const cleanUrl = normalizeUrl(url);
+    if (!cleanUrl) return res.status(400).json({ error: "invalid_url" });
+
+    const url_hash = hashUrl(cleanUrl);
+
+    // 1. Cache local
+    const local = getLocalCache(url_hash);
+    if (local)
+      return res.json({
+        success: true,
+        analysis: local,
+        cached: true,
+      });
+
+    // 2. Cache remoto
+    const { data: remote } = await supabase
+      .from("analysis_cache")
+      .select("result")
+      .eq("url_hash", url_hash)
+      .maybeSingle();
+
+    if (remote?.result) {
+      setLocalCache(url_hash, remote.result);
+      return res.json({
+        success: true,
+        analysis: remote.result,
+        cached: true,
+      });
+    }
+
+    // 3. Reservar crédito
+    const { data: reserve } = await supabase.rpc("reserve_credits", {
+      p_user_id: userId,
+      p_amount: 1,
+    });
+
+    if (!reserve?.success)
+      return res.status(402).json({ error: "insufficient_credits" });
+
+    const reservationId = reserve.reservation_id;
+
+    // 4. Scraping
+    let result;
+    try {
+      result = await scrapeOffer(cleanUrl);
+    } catch (err) {
+      await supabase.rpc("release_reservation", {
+        p_reservation_id: reservationId,
+      });
+      return res.status(500).json({ error: "scrape_failed" });
+    }
+
+    // 5. Cache
+    setLocalCache(url_hash, result);
+    await supabase.from("analysis_cache").upsert({
+      url_hash,
+      url: cleanUrl,
+      result,
+    });
+
+    // 6. Commit
+    const { data: commit } = await supabase.rpc("commit_reservation", {
+      p_reservation_id: reservationId,
+    });
+
+    if (!commit?.success)
+      return res.status(500).json({ error: "commit_failed" });
+
+    return res.json({
+      success: true,
+      analysis: result,
+      credits_remaining: commit.credits_remaining,
+      cached: false,
+    });
+  } catch (err) {
+    console.error(err);
+    return res.status(500).json({ error: "internal_error" });
+  }
+});
+
+export default router;

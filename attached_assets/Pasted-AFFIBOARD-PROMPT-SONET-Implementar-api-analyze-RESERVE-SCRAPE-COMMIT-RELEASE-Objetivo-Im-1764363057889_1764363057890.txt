@@ -1,0 +1,87 @@
+AFFIBOARD — PROMPT SONET: Implementar /api/analyze (RESERVE → SCRAPE → COMMIT/RELEASE)
+
+Objetivo:
+Implementar o fluxo completo do MVP AffiBoard no backend Express e no banco Supabase, incluindo tabelas, RPCs, rota /api/analyze, cache local (SQLite), worker scraper (axios+cheerio), cron de expiração de reservas e checklist E2E.
+
+Variáveis de ambiente (configure no Replit/agent):
+- SUPABASE_URL
+- SUPABASE_SERVICE_ROLE_KEY  (usar somente no backend; NEVER expose)
+- SUPABASE_ANON_KEY
+- RESERVATION_TTL_SECONDS (ex: 600)
+- SQLITE_PATH (ex: ./cache.db)
+
+Tarefas (orde mprioritária):
+
+A) Banco (Supabase) — executar SQLs:
+1. Criar tabela analysis_requests (id, user_id, url, url_hash(16), status, result jsonb, credits_reserved, reservation_id, created_at, updated_at).
+2. Criar tabela analysis_cache (url_hash PK, url, offer_data jsonb, source, created_at).
+3. Criar tabela credit_reservations (id, user_id, reserved_amount, status, expire_at, created_at).
+4. Criar índices necessários e constraints FK para profiles.id.
+
+B) RPCs (Postgres, SECURITY DEFINER):
+1. reserve_credits(p_user_id uuid, p_amount int, p_ttl_seconds int) -> retorna { success, reservation_id, expires_at }.
+   - Deve checar profiles.credits FOR UPDATE; se suficiente: inserir reservation (status reserved) e retornar success.
+2. commit_reservation(p_reservation_id uuid) -> aplica débito atômico (UPDATE profiles SET credits = credits - amount) e marca reservation committed; retorna remaining_credits.
+3. release_reservation(p_reservation_id uuid) -> marca reservation released; se necessário reestornar créditos; retorna success.
+4. expire_old_reservations() -> helper para cron.
+
+C) Backend Express (server/routes/analyze.js ou TS) — implementar rota POST /api/analyze:
+- Autenticar token Supabase (supabase.auth.getUser(token)).
+- Normalizar URL (remover utm, fbclid, force https, trim trailing slash).
+- Gerar url_hash = sha256(normalized).slice(0,16).
+- Checar local cache (SQLite). Se hit -> retornar { success, analysis, credits_remaining, cached:true }.
+- Checar remote cache (analysis_cache). Se hit -> promover para local e retornar cached:true.
+- Circuit-breaker: se domínio com >=3 falhas recentes, fallback para cache ou retornar 503.
+- Chamar supabase.rpc('reserve_credits', { p_user_id: user.id, p_amount:1, p_ttl_seconds: RESERVATION_TTL_SECONDS }).
+  - Se reserve falhar => retornar 402.
+- Inserir analysis_request com status='pending' e reservation_id.
+- Executar scraping sync (MVP: synchronous wait up to 20s) usando axios+cheerio:
+  - timeout 10s, retry 1x, backoff 2s, user-agent rotativo.
+- Se scraping falhar:
+  - chamar supabase.rpc('release_reservation', { p_reservation_id })
+  - atualizar analysis_request status='failed' e result={error}
+  - retornar 502 com error.
+- Se scraping OK:
+  - computar score (MVP heurístico: base 50 + title + price)
+  - salvar no cache local (SQLite) e upsert em analysis_cache
+  - chamar supabase.rpc('commit_reservation', { p_reservation_id }) e obter remaining_credits
+  - atualizar analysis_request status='success' e result=json
+  - retornar { success:true, analysis, credits_remaining, cached:false }
+
+D) Cache local (SQLite):
+- Implementar serviço cache (get, set, clean, promote)
+- TTL default: 24h (ajustável por plan)
+
+E) Worker scraper (worker thread ou process):
+- Processa jobs enfileirados (opcional para heavy scrapes)
+- Reaproveitar httpScrape com same config
+- Ao completar job, persistir cache + update analysis_request + commit reservation
+
+F) Cron jobs:
+- release_expired_reservations() — rodar a cada 5 minutos (executa expire_old_reservations RPC)
+- clean_cache() — diário
+
+G) Segurança:
+- Todas RPCs criadas com SECURITY DEFINER
+- Backend usa SUPABASE_SERVICE_ROLE_KEY
+- RLS: manter policies de leitura para usuários; operações críticas via service key
+
+H) Testes & Entregáveis:
+Ao finalizar, entregar:
+1. DIFF / PR com todos os arquivos alterados (server/routes/analyze.js, services/cache, services/scraper, worker, migrations/*.sql)
+2. Output da execução do SQL (sucesso ou erros)
+3. Logs do servidor durante 3 cenários: happy-path, scrape failure, concurrent requests (x5)
+4. Resultado dos testes E2E (checklist abaixo)
+5. Instruções de como rodar localmente e variáveis de env
+
+Checklist E2E a validar:
+- Login -> POST /api/analyze com token -> success e credit decreased
+- Repetir mesma URL -> cached=true e credits não decreased
+- Simular scrape fail -> reservation released and credits unchanged
+- Concorrência: 5 paralelas com 1 crédito disponível -> apenas 1 commit
+- Cron expire works -> reservations expired marked
+
+Execução:
+- Ao terminar, me devolva o diff e os resultados dos testes. Se algo falhar, corrija e execute novamente até passar o checklist.
+
+Fim do prompt.

@@ -1,0 +1,362 @@
+PROMPT SONET — IMPLEMENTAÇÃO COMPLETA DO MVP AFFIBOARD
+
+(versão engenheiro sênior, pronta para automação)
+
+Você agora é o Agente de Engenharia Principal do projeto AffiBoard.
+Sua função é implementar o backend real do MVP, com base no contexto final abaixo.
+
+✅ CONTEXTO DO PROJETO (VERSÃO FINAL)
+
+O AffiBoard é um SaaS que analisa ofertas para afiliados.
+O frontend React + Supabase já está pronto e funcionando.
+
+O backend Express existe, mas a rota principal /api/analyze ainda não foi implementada.
+
+O Supabase contém:
+
+profiles
+
+credits
+
+policies RLS
+
+auth
+
+porém faltam as tabelas e RPCs essenciais do MVP.
+
+
+O fluxo oficial e validado por múltiplas IAs é:
+
+🔵 Fluxo Final do MVP (oficial e obrigatório)
+
+1. Validar JWT
+
+
+2. Normalizar URL (remover parâmetros UTM, fbclid…)
+
+
+3. Gerar url_hash = SHA256(url_normalized).slice(0,16)
+
+
+4. Verificar cache local (SQLite)
+
+
+5. Verificar cache remoto (Supabase)
+
+
+6. Se cache existir → retornar cached:true e não descontar crédito
+
+
+7. Criar analysis_request (status: pending)
+
+
+8. Reservar crédito via RPC → reserve_credits
+
+
+9. Scraping → axios + cheerio + timeout 10s
+
+
+10. Salvar no cache local + remoto
+
+
+11. Commit da reserva via RPC → commit_reservation
+
+
+12. Em erro → release_reservation
+
+
+13. Retornar JSON:
+
+
+
+{
+  "success": true,
+  "analysis": {...},
+  "credits_remaining": number,
+  "cached": boolean
+}
+
+Este é o fluxo obrigatório e você deve implementá-lo exatamente.
+
+
+---
+
+🟦 SUAS ENTREGAS (OBRIGATÓRIAS)
+
+Você deve implementar tudo abaixo, 100% funcional:
+
+
+---
+
+✔ 1. Criar tabelas no Supabase:
+
+analysis_requests
+
+colunas:
+
+id uuid PK
+
+user_id uuid
+
+url
+
+url_normalized
+
+url_hash (varchar(16))
+
+result JSON
+
+status (“pending”, “success”, “failed”)
+
+reservation_id uuid
+
+created_at
+
+updated_at
+
+
+
+---
+
+analysis_cache
+
+url_hash PK
+
+url
+
+offer_data jsonb
+
+source text
+
+created_at timestamptz
+
+
+
+---
+
+credit_reservations
+
+id uuid PK
+
+user_id uuid
+
+amount int default 1
+
+status (“reserved”, “committed”, “released”, “expired”)
+
+created_at timestamptz
+
+expire_at timestamptz
+
+
+
+---
+
+✔ 2. Criar RPCs (Postgres, SECURITY DEFINER)
+
+reserve_credits(user_id, amount, ttl_seconds)
+
+→ cria reserva
+→ retorna reservation_id
+→ NÃO debita ainda
+
+commit_reservation(reservation_id)
+
+→ debita de verdade
+→ retorna remaining_credits
+
+release_reservation(reservation_id)
+
+→ devolve crédito ao usuário
+
+Esses RPCs precisam garantir atomicidade usando FOR UPDATE.
+
+
+---
+
+✔ 3. Implementar rota /api/analyze completa (Express)
+
+Arquivo recomendado:
+backend/routes/analyze.js
+
+A rota deve:
+
+validar JWT via Supabase
+
+normalizar URL
+
+gerar url_hash
+
+checar cache local (SQLite)
+
+checar cache remoto (Supabase)
+
+criar analysis_request
+
+chamar reserve_credits
+
+scraping (axios+cheerio, timeout 10s, 1 retry, user-agent rotativo)
+
+salvar no cache local
+
+salvar no cache remoto
+
+commit_reservation
+
+retornar JSON final
+
+
+
+---
+
+✔ 4. Criar o Cache Local (SQLite)
+
+Arquivo recomendado:
+backend/services/cache-sqlite.js
+
+Funções obrigatórias:
+
+getCache(url_hash)
+
+setCache(url_hash, data)
+
+cleanExpiredCache()
+
+
+TTL padrão: 24h
+
+
+---
+
+✔ 5. Criar o Worker de Scraping (ou função interna)
+
+Arquivo recomendado:
+backend/services/scraper.js
+
+Requisitos:
+
+axios + cheerio
+
+timeout 10s
+
+retry 1x com backoff 2s
+
+user-agent rotativo
+
+circuit-breaker de 3 falhas
+
+
+Retornar:
+
+{ "title": "...", "price": "...", "timestamp": "..." }
+
+
+---
+
+✔ 6. Fazer integração Supabase Service Role no backend
+
+Criar arquivo: backend/lib/supabase.js
+
+Usar:
+
+SUPABASE_URL
+
+SUPABASE_SERVICE_ROLE_KEY
+
+
+O backend NUNCA usa anon-key para debitar créditos.
+
+
+---
+
+✔ 7. Testes E2E
+
+Gerar script ou instrução para:
+
+1. Fazer análise com crédito suficiente
+
+
+2. Fazer análise repetida (cache hit)
+
+
+3. Forçar erro de scraping (deve liberar reserva)
+
+
+4. Testar concorrência (duas requests simultâneas)
+
+
+5. Validar créditos restantes corretamente
+
+
+
+
+---
+
+🟦 REGRAS DO AGENTE
+
+1. Você deve ler todo o projeto atual.
+
+
+2. Você deve modificar os arquivos necessários.
+
+
+3. Retorne DIFFs ou arquivos completos.
+
+
+4. Retorne também instruções de onde colar cada arquivo.
+
+
+5. Valide o código antes de enviar.
+
+
+6. Nada de respostas vagas — entregue tudo pronto.
+
+
+7. Se houver falha, corrija automaticamente.
+
+
+
+
+---
+
+🟦 SAÍDA ESPERADA
+
+Quando terminar, você deve me entregar:
+
+✔ 1. Código completo das tabelas + RPCs
+
+✔ 2. Código completo do backend /api/analyze
+
+✔ 3. Código completo do scraper
+
+✔ 4. Código completo do SQLite cache
+
+✔ 5. Código dos helpers (hash, normalizeUrl, supabase client)
+
+✔ 6. Registro das rotas no Express
+
+✔ 7. Diferenças (DIFF) dos arquivos criados
+
+✔ 8. Checklist final da execução
+
+
+---
+
+🟦 INSTRUÇÃO FINAL
+
+Execute todas as etapas acima agora, usando o projeto atual como base.
+Ao terminar, devolva:
+
+arquivos completos
+
+diffs
+
+logs
+
+instruções de validação
+
+
+Iniciar.
+
+
+---

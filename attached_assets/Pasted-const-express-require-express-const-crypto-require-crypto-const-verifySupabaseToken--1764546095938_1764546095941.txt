@@ -1,0 +1,145 @@
+const express = require('express');
+const crypto = require('crypto');
+const { verifySupabaseToken } = require('../lib/supabaseAdmin');
+const { supabaseAdmin } = require('../lib/supabaseAdmin');
+const { getCacheLocal, setCacheLocal } = require('../services/cache');
+const { analyzeLimiter } = require('../middleware/analyzeLimiter');
+const { normalizeUrl } = require('../utils/normalizeUrl');
+const { consumeCredits } = require('../services/creditsService');
+
+const router = express.Router();
+
+/* ----------------------------------------
+   Helpers
+---------------------------------------- */
+function hashUrl(url) {
+  return crypto.createHash('sha256').update(url).digest('hex').slice(0, 16);
+}
+
+/* ----------------------------------------
+   Rota Principal: /api/analyze-mvp
+---------------------------------------- */
+router.post('/', analyzeLimiter, verifySupabaseToken, async (req, res) => {
+  const user_id = req.user?.id;
+
+  try {
+    const { url } = req.body;
+
+    if (!url) {
+      return res.status(400).json({
+        success: false,
+        error: 'URL é obrigatória'
+      });
+    }
+
+    console.log(`[MVP] Iniciando análise p/ user ${user_id}: ${url}`);
+
+    /* ----------------------------------------
+       Normalizar URL
+    ---------------------------------------- */
+    const normalizedUrl = normalizeUrl(url);
+    if (!normalizedUrl) {
+      return res.status(400).json({
+        success: false,
+        error: 'URL inválida'
+      });
+    }
+
+    const url_hash = hashUrl(normalizedUrl);
+    console.log(`[MVP] URL normalizada: ${normalizedUrl}, hash: ${url_hash}`);
+
+    /* ----------------------------------------
+       Cache Local (SQLite)
+    ---------------------------------------- */
+    const cached = getCacheLocal(url_hash);
+
+    if (cached) {
+      console.log(`[MVP] 🟢 Cache HIT — entregando versão cacheada`);
+
+      // Obter créditos restantes
+      const { data: profile } = await supabaseAdmin
+        .from('profiles')
+        .select('credits')
+        .eq('id', user_id)
+        .single();
+
+      return res.json({
+        success: true,
+        cached: true,
+        cache_source: 'local',
+        analysis: cached.analysis,
+        credits_remaining: profile?.credits ?? 0
+      });
+    }
+
+    console.log(`[MVP] 🔵 Cache MISS — iniciando scraping real...`);
+
+    /* ----------------------------------------
+       Debitar Créditos (RPC consume_credits)
+    ---------------------------------------- */
+    const creditsOk = await consumeCredits(user_id, 1);
+
+    if (!creditsOk) {
+      return res.status(400).json({
+        success: false,
+        error: 'Créditos insuficientes'
+      });
+    }
+
+    /* ----------------------------------------
+       Scraping REAL (MVP simplificado)
+       TODO: substituir pelo scraping definitivo
+    ---------------------------------------- */
+    const result = {
+      score: Math.floor(Math.random() * 100),
+      recommendations: [
+        'Adicionar mais prova social',
+        'Melhorar headline',
+        'Reduzir distrações na página'
+      ],
+      analyzed_at: new Date().toISOString(),
+      url: normalizedUrl
+    };
+
+    /* ----------------------------------------
+       Salvar em cache
+    ---------------------------------------- */
+    setCacheLocal(url_hash, normalizedUrl, result);
+
+    /* ----------------------------------------
+       Registrar log no Supabase
+    ---------------------------------------- */
+    await supabaseAdmin.from('analysis_logs').insert({
+      user_id,
+      url: normalizedUrl,
+      result,
+      credits_used: 1
+    });
+
+    /* ----------------------------------------
+       Retorno final para o frontend React
+    ---------------------------------------- */
+    const { data: profileAfter } = await supabaseAdmin
+      .from('profiles')
+      .select('credits')
+      .eq('id', user_id)
+      .single();
+
+    return res.json({
+      success: true,
+      cached: false,
+      analysis: result,
+      credits_remaining: profileAfter?.credits ?? 0
+    });
+
+  } catch (error) {
+    console.error('[MVP] ❌ Erro interno:', error);
+
+    return res.status(500).json({
+      success: false,
+      error: 'Erro interno do servidor'
+    });
+  }
+});
+
+module.exports = router;

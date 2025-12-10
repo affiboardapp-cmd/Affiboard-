@@ -1,0 +1,235 @@
+
+🔥 PROMPT MESTRE — Gerar Backend Completo do AffiBoard (KODE / VIBE / REPLIT AI)
+
+OBJETIVO
+Você é o agente responsável por gerar o backend completo, funcional e pronto para produção do meu SaaS AffiBoard.
+
+O frontend React já está pronto.
+O Supabase só tem a tabela profiles.
+Agora você precisa implementar toda a parte backend.
+
+
+---
+
+📌 O QUE VOCÊ DEVE FAZER
+
+Quero que você:
+
+1. Crie toda a estrutura de pastas:
+
+
+
+/server
+/server/routes
+/server/lib
+/server/middleware
+/server/utils
+
+2. Gerar todos os arquivos completos, incluindo:
+
+
+
+server/index.js
+server/routes.js
+server/routes/analyze.js
+server/lib/supabase.js
+server/lib/localCache.js
+server/lib/scraper.js
+server/middleware/auth.js
+
+3. Implementar 100% da rota /api/analyze, com o fluxo MVP final:
+
+
+
+validar JWT
+
+validar URL
+
+normalizar URL
+
+gerar url_hash sha256 / 16 chars
+
+checar cache local (SQLite)
+
+checar cache remoto (Supabase: analysis_cache)
+
+reservar crédito via RPC reserve_credits
+
+scraping via axios + cheerio
+
+salvar cache local + remoto
+
+commit_reservation
+
+release_reservation se der erro
+
+retornar JSON:
+
+
+{
+  "success": true,
+  "analysis": { ... },
+  "credits_remaining": 14,
+  "cached": false
+}
+
+4. Implementar biblioteca de cache local SQLite:
+
+
+
+TTL
+
+hits/misses
+
+save, get, clear
+
+
+5. Implementar Supabase client com SERVICE_ROLE_KEY (somente backend)
+
+
+6. Instalar todas as dependências necessárias:
+
+
+
+express
+@supabase/supabase-js
+axios
+cheerio
+better-sqlite3
+crypto
+cors
+
+7. Gerar automaticamente o SQL do Supabase, com:
+
+
+
+Tabelas obrigatórias:
+
+analysis_requests
+credit_reservations
+analysis_cache
+
+RPCs obrigatórias:
+
+reserve_credits
+commit_reservation
+release_reservation
+
+Implemente com:
+
+SECURITY DEFINER
+
+transações atômicas
+
+rollback seguro
+
+
+8. Adicionar logs claros em cada etapa.
+
+
+9. Configurar tudo para rodar no Replit ou Vibe, ou seja:
+
+
+
+usar PORT = process.env.PORT || 5000
+
+usar ./data/cache.db para SQLite
+
+criar diretório automaticamente caso não exista
+
+
+
+---
+
+📌 REFERÊNCIA — Fluxo Oficial /api/analyze
+
+Use EXATAMENTE isso:
+
+1. validar token Supabase
+
+
+2. normalizar URL
+
+
+3. gerar url_hash
+
+
+4. checar cache local
+
+
+5. checar cache remoto
+
+
+6. reserve_credits
+
+
+7. criar analysis_request (pending)
+
+
+8. scraping axios + cheerio
+
+
+9. salvar cache local + remoto
+
+
+10. commit_reservation
+
+
+11. release_reservation se erro
+
+
+12. retornar JSON
+
+
+
+Esse é o fluxo final, aprovado e validado.
+
+
+---
+
+📌 O QUE VOCÊ DEVE ENTREGAR AO FINAL
+
+Entregue:
+
+✔ Todos os arquivos completos
+
+✔ Estrutura final da árvore
+
+✔ SQL pronto pra colar no Supabase
+
+✔ Lista de dependências
+
+✔ Instruções finais de como rodar o backend:
+
+npm install
+node server/index.js
+
+✔ Teste cURL final:
+
+curl -X POST https://meu-backend/api/analyze \
+ -H "Authorization: Bearer <TOKEN>" \
+ -H "Content-Type: application/json" \
+ -d '{"url": "https://exemplo.com"}'
+
+
+---
+
+⚠ Regras finais
+
+NÃO pedir confirmação.
+
+NÃO perguntar nada.
+
+Apenas EXECUTE.
+
+Gere tudo 100% completo e funcional.
+
+Se houver partes faltando no meu projeto atual → você deve CRIAR.
+
+
+
+---
+
+🔥 COMEÇAR AGORA
+
+Gere todo o backend completo seguindo tudo acima.

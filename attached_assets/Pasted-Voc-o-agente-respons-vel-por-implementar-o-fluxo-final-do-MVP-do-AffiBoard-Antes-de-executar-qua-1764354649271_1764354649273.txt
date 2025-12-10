@@ -1,0 +1,165 @@
+Você é o agente responsável por implementar o fluxo final do MVP do AffiBoard.
+Antes de executar qualquer alteração, você DEVE:
+
+1. Ler TODO este contexto.
+
+
+2. Validar se está coerente com o fluxo final aprovado:
+reserve → scrape → commit/release
+
+
+3. Confirmar que não irá modificar tabelas existentes.
+
+
+4. Confirmar que usará SUPABASE_SERVICE_ROLE_KEY em TODAS as operações críticas.
+
+
+5. Somente depois disso, gerar e aplicar as alterações.
+
+
+
+
+---
+
+📌 CONTEXTO OFICIAL DO MVP (RESUMO)
+
+O AffiBoard é um SaaS que analisa URLs de ofertas.
+O fluxo final e validado por todas as IAs é:
+
+1. Validar JWT
+
+
+2. Normalizar URL
+
+
+3. Criar url_hash
+
+
+4. Verificar cache local (SQLite)
+
+
+5. Verificar cache remoto (Supabase)
+
+
+6. Se tiver → retornar sem cobrar
+
+
+7. Se NÃO tiver:
+
+reserve_credits
+
+criar analysis_request
+
+scraping (timeout 10s, 1 retry, UA rotativo)
+
+salvar cache
+
+commit_reservation
+
+erro → release_reservation
+
+
+
+8. Retornar JSON: { success, analysis, credits_remaining, cached }
+
+
+
+
+---
+
+📌 SUA MISSÃO AGORA
+
+Implementar completamente:
+
+1. Tabelas novas (somente essas):
+
+analysis_requests
+
+credit_reservations
+
+analysis_cache
+
+
+
+2. RPCs novas (somente essas):
+
+reserve_credits
+
+commit_reservation
+
+release_reservation
+
+
+
+3. Implementar a rota /api/analyze no Express usando:
+
+SERVICE_ROLE_KEY
+
+reserva antes do scrape
+
+timeout
+
+retry
+
+circuit-breaker
+
+commit ou release final
+
+
+
+4. Implementar o cache:
+
+Local (SQLite, TTL 7 dias)
+
+Remoto (Supabase, TTL 30 dias)
+
+
+
+5. Criar worker scraper separado.
+
+
+6. Checklist E2E:
+
+análise simples
+
+cache hit
+
+crédito insuficiente
+
+concorrência
+
+rollback
+
+circuit-breaker
+
+
+
+
+
+---
+
+⚠️ REGRAS IMPORTANTES
+
+❗ NUNCA modifique tabelas já existentes no Supabase
+❗ NUNCA recrie RPCs existentes sem validar antes
+❗ TODAS as operações devem usar SERVICE_ROLE_KEY
+❗ Qualquer falha no scraping → release_reservation
+❗ Não use Puppeteer
+❗ Não usar Edge Functions
+❗ RLAE (reserve → log → analyze → execute) é obrigatório
+
+
+---
+
+📦 AGORA EXECUTE:
+
+(1) Gere todo o SQL final, pronto para colar
+(2) Gere o /api/analyze completo
+(3) Gere os arquivos de cache
+(4) Gere o worker
+(5) Gere o checklist E2E
+(6) Valide tudo sozinho antes de finalizar
+
+Quando terminar, responda:
+
+"IMPLEMENTAÇÃO MVP GERADA E VALIDADA"

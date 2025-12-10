@@ -1,0 +1,317 @@
+
+✅ 1) server/utils/supabase.js
+
+Crie o arquivo:
+
+server/utils/supabase.js
+
+import { createClient } from "@supabase/supabase-js";
+
+const supabase = createClient(
+  process.env.SUPABASE_URL,
+  process.env.SERVICE_ROLE_KEY,
+  {
+    auth: { persistSession: false }
+  }
+);
+
+export default supabase;
+
+
+---
+
+✅ 2) server/utils/normalizeUrl.js
+
+Crie o arquivo:
+
+server/utils/normalizeUrl.js
+
+export function normalizeUrl(rawUrl) {
+  try {
+    const url = new URL(rawUrl.trim());
+    url.hash = "";
+    return url.toString();
+  } catch (e) {
+    return null;
+  }
+}
+
+
+---
+
+✅ 3) server/utils/hash.js
+
+Crie:
+
+server/utils/hash.js
+
+import crypto from "crypto";
+
+export function sha16(value) {
+  return crypto.createHash("sha256").update(value).digest("hex").slice(0, 16);
+}
+
+
+---
+
+✅ 4) server/utils/scraper.js
+
+Crie:
+
+server/utils/scraper.js
+
+import axios from "axios";
+import cheerio from "cheerio";
+
+export async function scrapeOffer(url) {
+  const res = await axios.get(url, {
+    timeout: 10000,
+    headers: {
+      "User-Agent": "Mozilla/5.0 (Linux) AffiBoardBot/1.0"
+    }
+  });
+
+  const html = res.data;
+  const $ = cheerio.load(html);
+
+  const title =
+    $("h1").first().text().trim() ||
+    $("meta[property='og:title']").attr("content") ||
+    $("title").text().trim() ||
+    null;
+
+  const priceMatch = html.match(/R\$[\s]*([\d\.,]+)/i);
+  const price = priceMatch ? priceMatch[1] : null;
+
+  // MVP scoring
+  let score = 50;
+  if (title) score += 20;
+  if (price) score += 30;
+
+  if (score > 100) score = 100;
+
+  return {
+    url,
+    title,
+    price,
+    score,
+    timestamp: new Date().toISOString()
+  };
+}
+
+
+---
+
+✅ 5) ROTA /api/credits
+
+Arquivo: server/routes/credits.js
+
+import express from "express";
+import supabase from "../utils/supabase.js";
+
+const router = express.Router();
+
+router.get("/", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+
+  if (!token) return res.status(401).json({ error: "no_token" });
+
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: "invalid_token" });
+
+  const { data: profile } = await supabase
+    .from("profiles")
+    .select("credits, plan_tier")
+    .eq("id", user.id)
+    .maybeSingle();
+
+  res.json({
+    success: true,
+    credits: profile?.credits ?? 0,
+    plan: profile?.plan_tier ?? "free"
+  });
+});
+
+export default router;
+
+
+---
+
+✅ 6) ROTA /api/history
+
+Arquivo: server/routes/history.js
+
+import express from "express";
+import supabase from "../utils/supabase.js";
+
+const router = express.Router();
+
+router.get("/", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+
+  if (!token) return res.status(401).json({ error: "no_token" });
+
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: "invalid_token" });
+
+  const { data, error: hErr } = await supabase
+    .from("analysis_logs")
+    .select("*")
+    .eq("user_id", user.id)
+    .order("created_at", { ascending: false });
+
+  if (hErr) return res.status(500).json({ error: "db_error" });
+
+  res.json({ success: true, history: data });
+});
+
+export default router;
+
+
+---
+
+✅ 7) ROTA /api/analyze
+
+Arquivo: server/routes/analyze.js
+
+import express from "express";
+import supabase from "../utils/supabase.js";
+import { normalizeUrl } from "../utils/normalizeUrl.js";
+import { sha16 } from "../utils/hash.js";
+import { scrapeOffer } from "../utils/scraper.js";
+
+const router = express.Router();
+
+router.post("/", async (req, res) => {
+  const token = req.headers.authorization?.replace("Bearer ", "");
+
+  if (!token) return res.status(401).json({ error: "no_token" });
+
+  const { data: { user }, error } = await supabase.auth.getUser(token);
+  if (error || !user) return res.status(401).json({ error: "invalid_token" });
+
+  const rawUrl = req.body.url;
+  const url = normalizeUrl(rawUrl);
+
+  if (!url) return res.status(400).json({ error: "invalid_url" });
+
+  const url_hash = sha16(url);
+
+  // 1) Cache remoto
+  const { data: cached } = await supabase
+    .from("analysis_cache")
+    .select("result")
+    .eq("url_hash", url_hash)
+    .maybeSingle();
+
+  if (cached?.result) {
+    return res.json({
+      success: true,
+      cached: true,
+      analysis: cached.result
+    });
+  }
+
+  // 2) Debitar crédito atomicamente
+  const { data: debitRes } = await supabase
+    .rpc("debit_credits_atomic", { p_user_id: user.id, p_amount: 1 });
+
+  if (!debitRes?.success) {
+    return res.status(402).json({
+      success: false,
+      error: "insufficient_credits"
+    });
+  }
+
+  // 3) Scraping
+  let analysis;
+  try {
+    analysis = await scrapeOffer(url);
+  } catch (err) {
+    return res.status(500).json({ error: "scraping_failed" });
+  }
+
+  // 4) Salvar cache remoto
+  await supabase.from("analysis_cache").upsert({
+    url_hash,
+    url,
+    result: analysis
+  });
+
+  // 5) Log
+  await supabase.from("analysis_logs").insert({
+    user_id: user.id,
+    url,
+    url_hash,
+    result: analysis
+  });
+
+  res.json({
+    success: true,
+    cached: false,
+    analysis,
+    credits_remaining: debitRes.credits_remaining
+  });
+});
+
+export default router;
+
+
+---
+
+✅ 8) Atualizar server/index.js
+
+Adicione:
+
+import historyRoute from "./routes/history.js";
+
+app.use("/api/history", historyRoute);
+
+Fica assim:
+
+import express from "express";
+import analyzeRoute from "./routes/analyze.js";
+import creditsRoute from "./routes/credits.js";
+import historyRoute from "./routes/history.js";
+
+const app = express();
+app.use(express.json());
+
+app.use("/api/analyze", analyzeRoute);
+app.use("/api/credits", creditsRoute);
+app.use("/api/history", historyRoute);
+
+app.get("/health", (req, res) => res.json({ ok: true }));
+
+const PORT = process.env.PORT || 5000;
+app.listen(PORT, () =>
+  console.log("AffiBoard backend running on port", PORT)
+);
+
+
+---
+
+✅ 9) CHECKLIST DE TESTES
+
+Quando terminar, digite isso no terminal do Replit:
+
+npm run dev
+
+Depois teste:
+
+🔹 1. Testar health:
+
+curl http://localhost:5000/health
+
+🔹 2. Testar créditos:
+
+Copie o token DEV do frontend → cole em:
+
+curl -H "Authorization: Bearer SEU_TOKEN" http://localhost:5000/api/credits
+
+🔹 3. Testar analyze:
+
+curl -X POST http://localhost:5000/api/analyze \
+-H "Authorization: Bearer SEU_TOKEN" \
+-H "Content-Type: application/json" \
+-d '{"url": "https://www.google.com"}'

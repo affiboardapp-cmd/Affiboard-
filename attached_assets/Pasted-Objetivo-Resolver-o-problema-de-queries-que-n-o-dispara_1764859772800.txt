@@ -1,0 +1,127 @@
+Objetivo: Resolver o problema de queries que não disparam, token não enviado e Dashboard travado.
+Modificações 100% seguras e necessárias.
+
+
+
+
+---
+
+🔧 1. Atualizar Dashboard: remover “enabled: false”
+
+Arquivo: client/src/pages/dashboard.tsx
+
+Ação do agente:
+
+> Substitua qualquer ocorrência de:
+
+
+
+enabled: !!session?.access_token,
+
+por:
+
+enabled: true,
+
+
+---
+
+🔧 2. Atualizar authFetch para garantir o envio do token
+
+Arquivo: client/src/lib/queryClient.ts
+
+Ação do agente:
+
+> Substitua completamente a função authFetch pelo código abaixo:
+
+
+
+import { supabase } from "./supabase";
+
+export async function authFetch(url: string, options: any = {}) {
+  const { data: { session } } = await supabase.auth.getSession();
+  const token = session?.access_token;
+
+  console.log("[AUTHFETCH] Token presente?", !!token);
+
+  const headers = {
+    ...(options.headers || {}),
+    "Content-Type": "application/json",
+    ...(token ? { Authorization: `Bearer ${token}` } : {}),
+  };
+
+  const res = await fetch(url, { ...options, headers });
+
+  console.log("[AUTHFETCH] Status:", res.status, url);
+
+  return res;
+}
+
+
+---
+
+🔧 3. Corrigir getQueryFn para parar de montar URL errada
+
+Arquivo: client/src/lib/queryClient.ts
+
+Ação do agente:
+
+> Substitua a função queryFn por:
+
+
+
+queryFn: async ({ queryKey }) => {
+  const url = queryKey[0]; // Correção — não usar join()
+
+  const res = await authFetch(url);
+
+  if (!res.ok) {
+    console.error("[QUERY ERROR]", url, res.status);
+    throw new Error(`HTTP ${res.status}`);
+  }
+
+  return res.json();
+}
+
+
+---
+
+🔧 4. Garantir que só existe uma instância do Supabase
+
+Arquivo: client/src/lib/queryClient.ts
+
+Ação do agente:
+
+> Remova qualquer createClient ou createSupabaseClient dentro deste arquivo.
+Use somente:
+
+
+
+import { supabase } from "./supabase";
+
+Esto elimina os erros:
+
+"Multiple GoTrueClient instances detected"
+
+Sessões desincronizadas
+
+Token ausente
+
+
+
+---
+
+🔧 5. Limpar o cache do Vite (reduz bugs visuais e travamentos)
+
+Ação do agente: Executar no console do Replit:
+
+rm -rf node_modules/.vite
+
+
+---
+
+🔧 6. Reiniciar o servidor
+
+Ação do agente: executar:
+
+npm run dev:old
+

@@ -1,0 +1,200 @@
+PROMPT — “CORRIGIR /API/ANALYZE + INTEGRAR BACKEND EXPRESS AO FRONTEND REACT”
+
+Quero que você corrija o fluxo de análise do AffiBoard com base no projeto atual (React + Express + Supabase).
+
+📌 OBJETIVO
+
+Quando o usuário entrar em /analyze, ele deve:
+
+1. Inserir uma URL
+
+
+2. Clicar em “Analisar”
+
+
+3. O frontend React deve chamar:
+
+
+
+POST http://0.0.0.0:5000/api/analyze
+Authorization: Bearer <JWT>
+Content-Type: application/json
+Body: { "url": "<url>" }
+
+4. Receber JSON da análise
+
+
+5. Exibir no componente AnalyzePage
+
+
+6. Debitar créditos (já está implementado no backend)
+
+
+7. Registrar no usage_history
+
+
+
+🛠️ TAREFAS QUE VOCÊ PRECISA APLICAR
+
+A partir do estado atual do repo:
+
+
+---
+
+1. Criar/Atualizar a rota /api/analyze no Express
+
+
+
+Local:
+
+/server/routes.ts
+/server/index.ts
+
+Requisitos:
+
+Criar POST /api/analyze
+
+Validar header Authorization
+
+Validar token no Supabase (usando supabase-js)
+
+Ler req.body.url
+
+Executar scraper simples HTTP → pegar <title> e preço (regex)
+
+Gerar score simples (como já fizemos)
+
+Registrar no Supabase:
+
+usage_history (url, score, user_id)
+
+debit_credits_atomic (1 crédito)
+
+Retornar JSON:
+
+{
+"success": true,
+"analysis": { ... },
+"credits_remaining": number
+}
+
+
+---
+
+2. Ajustar AnalyzePage para consumir backend Express
+
+
+
+Local:
+
+client/src/pages/analyze.tsx
+client/src/lib/api.ts
+
+Requisitos:
+
+Parar de usar Supabase Edge Function
+
+Migrar para:
+
+fetch('/api/analyze')
+
+Enviar token JWT do Supabase via:
+
+const { data: { session } } = await supabase.auth.getSession();
+Authorization: Bearer ${session.access_token}
+
+Exibir loading, erros e resultado
+
+
+---
+
+3. Criar serviço de API real no frontend
+
+
+
+Atualizar:
+
+client/src/lib/api.ts
+
+Substituir analyzeOffer por:
+
+export async function analyzeOffer(url: string) {
+const { data: { session } } = await supabase.auth.getSession();
+const res = await fetch('/api/analyze', {
+method: 'POST',
+headers: {
+'Authorization': Bearer ${session.access_token},
+'Content-Type': 'application/json'
+},
+body: JSON.stringify({ url })
+});
+return res.json();
+}
+
+
+---
+
+4. Ajustar o layout
+
+
+
+Garantir que navbar não cubra o conteúdo
+
+Garantir que o botão “Analisar” funcione em mobile
+
+Garantir responsividade
+
+
+---
+
+5. Validar tudo automaticamente
+
+
+
+Simule:
+
+Login
+
+Ir para /analyze
+
+Inserir URL
+
+Clicar no botão
+
+Ver se aparece JSON
+
+Ver se créditos diminuem no profile
+
+Ver se aparece no usage_history
+
+
+---
+
+6. ENTREGAS
+
+
+
+Quero que você me entregue:
+
+Diff dos arquivos modificados
+
+Arquivos completos atualizados
+
+Diagnóstico do que estava errado
+
+Resultado final funcionando
+
+
+---
+
+IMPORTANTE
+
+Não criar nada novo além disso.
+Não alterar fluxo de Auth.
+Não mexer no React Router.
+Apenas corrigir integração AnalyzePage → Express → Supabase.
+
+
+---
+
+✨ É isso — aplique as correções imediatamente.

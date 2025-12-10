@@ -1,0 +1,95 @@
+import express from "express";
+import axios from "axios";
+import cheerio from "cheerio";
+import { supabase } from "../lib/supabase.js";
+
+const router = express.Router();
+
+// Normalize URL
+function normalizeUrl(url) {
+  try {
+    const u = new URL(url.trim());
+    u.hash = "";
+    return u.toString();
+  } catch (err) {
+    return null;
+  }
+}
+
+router.post("/", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+    if (!token) return res.status(401).json({ error: "Missing token" });
+
+    // Get authenticated user
+    const { data: { user }, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !user) return res.status(401).json({ error: "Invalid token" });
+
+    const url = normalizeUrl(req.body.url);
+    if (!url) return res.status(400).json({ error: "Invalid URL" });
+
+    // Check credits
+    const { data: profileData } = await supabase
+      .from("profiles")
+      .select("credits")
+      .eq("id", user.id)
+      .single();
+
+    if (!profileData || profileData.credits <= 0)
+      return res.status(402).json({ error: "Insufficient credits" });
+
+    // SCRAPING MVP
+    const html = await axios.get(url, { timeout: 8000 }).then(r => r.data);
+    const $ = cheerio.load(html);
+
+    const title =
+      $("h1").first().text().trim() ||
+      $("title").first().text().trim() ||
+      null;
+
+    const priceMatch = html.match(/R\$[\s]*([\d.,]+)/);
+    const price = priceMatch ? priceMatch[1] : null;
+
+    let score = 50;
+    if (title) score += 20;
+    if (price) score += 30;
+    if (score > 100) score = 100;
+
+    const analysis = {
+      url,
+      title,
+      price,
+      score,
+      created_at: new Date().toISOString(),
+    };
+
+    // Debit credits using atomic RPC
+    const { data: debitResult } = await supabase.rpc(
+      "debit_credits_atomic",
+      { p_user_id: user.id, p_amount: 1 }
+    );
+
+    if (!debitResult.success) {
+      return res.status(402).json({ error: "Insufficient credits" });
+    }
+
+    // Insert history
+    await supabase.from("usage_history").insert({
+      user_id: user.id,
+      url,
+      result: analysis,
+    });
+
+    return res.json({
+      success: true,
+      analysis,
+      credits_remaining: debitResult.credits_remaining,
+    });
+
+  } catch (err) {
+    console.error("Analyze Error", err);
+    return res.status(500).json({ error: "Internal error", details: err.message });
+  }
+});
+
+export default router;

@@ -1,0 +1,207 @@
+import express from "express";
+import crypto from "crypto";
+import axios from "axios";
+import cheerio from "cheerio";
+import { getCache, setCache } from "../services/cache.js";
+import supabase from "../lib/supabase.js";
+
+const router = express.Router();
+
+// Normalização simples (MVP)
+function normalizeUrl(raw) {
+  try {
+    const url = new URL(raw.trim());
+    url.hash = "";
+    url.searchParams.forEach((v, k) => {
+      if (k.startsWith("utm_") || k === "fbclid") url.searchParams.delete(k);
+    });
+    return url.toString().replace(/\/$/, "");
+  } catch (e) {
+    return null;
+  }
+}
+
+function sha256(text) {
+  return crypto.createHash("sha256").update(text).digest("hex");
+}
+
+// Scraper simples com timeout
+async function scrapeOffer(url) {
+  const res = await axios.get(url, {
+    timeout: 10000,
+    headers: { "User-Agent": "AffiBoardBot/1.0" },
+  });
+
+  const $ = cheerio.load(res.data);
+
+  const title =
+    $('meta[property="og:title"]').attr("content") ||
+    $("title").text().trim() ||
+    null;
+
+  let price = null;
+  $("script[type='application/ld+json']").each((_, el) => {
+    try {
+      const json = JSON.parse($(el).text());
+      if (json?.offers?.price) price = json.offers.price;
+    } catch {}
+  });
+
+  if (!price) {
+    const m = $.text().match(/R\$\s*([\d.,]+)/);
+    price = m ? m[1] : null;
+  }
+
+  return {
+    url,
+    title,
+    price,
+    timestamp: new Date().toISOString(),
+    source: "http-basic",
+  };
+}
+
+router.post("/", async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace("Bearer ", "");
+
+    if (!token) return res.status(401).json({ error: "missing_token" });
+
+    // VALIDAR TOKEN
+    const { data, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !data.user)
+      return res.status(401).json({ error: "invalid_token" });
+
+    const userId = data.user.id;
+    const { url } = req.body;
+
+    if (!url) return res.status(400).json({ error: "missing_url" });
+
+    // NORMALIZAÇÃO
+    const urlNorm = normalizeUrl(url);
+    if (!urlNorm) return res.status(400).json({ error: "invalid_url" });
+
+    const urlHash = sha256(urlNorm);
+
+    // 1) CACHE LOCAL (rápido)
+    const cachedLocal = await getCache(urlHash);
+    if (cachedLocal) {
+      return res.json({
+        success: true,
+        cached: true,
+        analysis: cachedLocal,
+        credits_remaining: null,
+      });
+    }
+
+    // 2) CACHE SUPABASE
+    const { data: cacheDb } = await supabase
+      .from("offers_cache")
+      .select("*")
+      .eq("url_hash", urlHash)
+      .maybeSingle();
+
+    if (cacheDb?.result) {
+      await setCache(urlHash, cacheDb.result);
+      return res.json({
+        success: true,
+        cached: true,
+        analysis: cacheDb.result,
+        credits_remaining: null,
+      });
+    }
+
+    // 3) CRIAR ANALYSIS_REQUEST
+    const { data: reqRow } = await supabase
+      .from("analysis_requests")
+      .insert({
+        user_id: userId,
+        url: url,
+        url_normalized: urlNorm,
+        url_hash: urlHash,
+        status: "pending",
+      })
+      .select()
+      .single();
+
+    const reqId = reqRow.id;
+
+    // 4) RESERVAR CRÉDITO
+    const { data: reserve } = await supabase.rpc("reserve_credits", {
+      p_user_id: userId,
+      p_amount: 1,
+      p_purpose: "analysis",
+    });
+
+    if (!reserve?.success) {
+      await supabase
+        .from("analysis_requests")
+        .update({ status: "failed" })
+        .eq("id", reqId);
+      return res
+        .status(402)
+        .json({ error: "insufficient_credits", detail: reserve });
+    }
+
+    const reservationId = reserve.reservation_id;
+
+    // 5) SCRAPING (com fallback)
+    let analysis;
+    try {
+      analysis = await scrapeOffer(urlNorm);
+    } catch (err) {
+      await supabase.rpc("release_reservation", {
+        p_reservation_id: reservationId,
+      });
+
+      await supabase
+        .from("analysis_requests")
+        .update({ status: "failed", result: { error: err.message } })
+        .eq("id", reqId);
+
+      return res.status(500).json({
+        error: "scrape_failed",
+        detail: err.message,
+      });
+    }
+
+    // 6) SALVAR CACHE
+    await setCache(urlHash, analysis);
+
+    await supabase
+      .from("analysis_requests")
+      .update({ status: "success", result: analysis })
+      .eq("id", reqId);
+
+    await supabase.from("offers_cache").upsert({
+      url_hash: urlHash,
+      url_normalized: urlNorm,
+      result: analysis,
+      updated_at: new Date().toISOString(),
+    });
+
+    // 7) CONFIRMAR DÉBITO
+    await supabase.rpc("commit_reservation", {
+      p_reservation_id: reservationId,
+    });
+
+    // 8) PUXAR CRÉDITOS ATUAIS
+    const { data: profile } = await supabase
+      .from("profiles")
+      .select("credits")
+      .eq("id", userId)
+      .single();
+
+    return res.json({
+      success: true,
+      cached: false,
+      analysis,
+      credits_remaining: profile?.credits ?? null,
+    });
+  } catch (err) {
+    console.error("analyze error:", err);
+    return res.status(500).json({ error: "internal_error", detail: err });
+  }
+});
+
+export default router;

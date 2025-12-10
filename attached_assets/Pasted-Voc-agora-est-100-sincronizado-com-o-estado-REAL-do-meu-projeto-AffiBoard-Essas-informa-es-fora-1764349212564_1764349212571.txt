@@ -1,0 +1,179 @@
+Você agora está 100% sincronizado com o estado REAL do meu projeto AffiBoard.
+Essas informações foram confirmadas tecnicamente por outro ChatGPT especialista e validadas como corretas, seguras e completas.
+
+📌 CONTEXTO DO PROJETO (OFICIAL)
+
+Frontend React funcionando: login, dashboard, histórico e análise.
+
+Backend Express configurado, mas ainda sem a rota final /api/analyze.
+
+Edge Functions antigas NÃO serão usadas no MVP.
+
+Banco Supabase com perfis, créditos e histórico.
+
+O MVP final precisa seguir o fluxo aprovado abaixo.
+
+
+
+---
+
+📌 FLUXO FINAL DO MVP (CONFIRMADO PELO CHATGPT ESPECIALISTA)
+
+1. Validar token Supabase (JWT).
+
+
+2. Normalizar URL (limpar UTM, fbclid, https, trailing slash).
+
+
+3. Criar url_hash (sha256).
+
+
+4. Consultar cache local SQLite.
+
+
+5. Consultar cache Supabase (analysis_cache).
+
+
+6. Se existir → retornar imediatamente (cached: true, sem usar crédito).
+
+
+7. Se não existir no cache:
+
+criar analysis_request com status "pending"
+
+reservar 1 crédito (RPC: reserve_credits)
+
+executar scraping simples com timeout de 10s
+
+salvar resultado no cache (SQLite + Supabase)
+
+confirmar reserva (RPC: commit_reservation)
+
+em caso de erro → devolver crédito (RPC: release_reservation)
+
+
+
+8. Frontend exibe resultado.
+
+
+
+⚠️ Exigências técnicas confirmadas:
+
+Todas as reservas devem expirar automaticamente em 5 minutos.
+
+Scraping deve ter timeout de 10s.
+
+RPCs devem ter nomes fixos:
+reserve_credits, commit_reservation, release_reservation.
+
+O endpoint deve retornar JSON no formato:
+{ success, analysis, credits_remaining, cached }.
+
+
+
+---
+
+📌 O QUE VOCÊ DEVE GERAR AGORA (ENTREGA OBRIGATÓRIA)
+
+1. Código completo das 3 RPCs (SQL):
+
+reserve_credits
+
+commit_reservation
+
+release_reservation
+
+
+2. SQL completo da tabela:
+
+analysis_requests
+Com colunas:
+
+id
+
+user_id
+
+url_original
+
+url_normalized
+
+url_hash
+
+status
+
+result JSON
+
+created_at
+
+updated_at
+
+
+3. Implementação COMPLETA e COMENTADA da rota Express:
+
+/api/analyze
+Usando o fluxo final aprovado.
+
+4. Implementação do Cache:
+
+Arquivo SQLite local
+
+Tabela Supabase analysis_cache
+
+TTL: 24h
+
+Promoção local → remoto
+
+
+5. Worker/Scraper simples:
+
+axios + cheerio
+
+timeout 10s
+
+retorna { title, price, timestamp }
+
+
+6. Checklist E2E completo:
+
+Testes:
+
+fluxo normal
+
+cache
+
+crédito insuficiente
+
+reserva/commit
+
+rollback
+
+concorrência
+
+
+
+---
+
+📌 REGRAS OBRIGATÓRIAS
+
+1. Use linguagem simples para que eu consiga validar.
+
+
+2. Gere o código completo e funcional.
+
+
+3. Antes de finalizar →
+valide automaticamente o código, corrija inconsistências e só então entregue.
+
+
+4. Nada de depender de Edge Functions.
+
+
+5. Toda a lógica deve rodar no backend Express.
+
+
+
+
+---
+
+Pode começar.
+

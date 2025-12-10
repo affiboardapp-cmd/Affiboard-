@@ -1,0 +1,389 @@
+### AFFIBOARD — PROMPT SONET: Criar esquema, RPCs e backend analyze flow (reserva → scraping → commit/release)
+# --- PARTE A: VARIÁVEIS de AMBIENTE (configure no Replit / SONET)
+# SUPABASE_URL
+# SUPABASE_SERVICE_ROLE_KEY   -> USAR SOMENTE NO BACKEND (never expose to frontend)
+# SUPABASE_ANON_KEY
+# FIRECRAWL_API_KEY (opcional)
+# RESERVATION_TTL_SECONDS (ex: 600)
+# DEFAULT_RESERVATION_TTL = 600
+
+# --- PARTE B: SQL - Tabelas e índices
+-- 1) Tabela analysis_requests (audit + idempotência diária)
+CREATE TABLE IF NOT EXISTS analysis_requests (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,                       -- auth.users.id
+  url text NOT NULL,
+  url_hash varchar(16) NOT NULL,               -- SHA256 -> primeiro 16 hex
+  status text NOT NULL DEFAULT 'pending',      -- pending | success | failed
+  credits_reserved int NOT NULL DEFAULT 1,
+  result jsonb,
+  created_at timestamptz DEFAULT now(),
+  updated_at timestamptz DEFAULT now()
+);
+CREATE UNIQUE INDEX IF NOT EXISTS ux_analysis_user_urlhash_date
+  ON analysis_requests (user_id, url_hash, (date_trunc('day', created_at)));
+
+-- 2) Cache persistente (Supabase)
+CREATE TABLE IF NOT EXISTS analysis_cache (
+  url_hash varchar(16) PRIMARY KEY,
+  url text NOT NULL,
+  offer_data jsonb NOT NULL,
+  source text NOT NULL,
+  created_at timestamptz DEFAULT now()
+);
+
+-- 3) Credit reservations (locks/reservations)
+CREATE TABLE IF NOT EXISTS credit_reservations (
+  id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+  user_id uuid NOT NULL,
+  reserved_amount int NOT NULL DEFAULT 1,
+  status text NOT NULL DEFAULT 'reserved', -- reserved | committed | released | expired
+  created_at timestamptz DEFAULT now(),
+  expire_at timestamptz NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_reservations_userid_status ON credit_reservations(user_id, status);
+
+-- 4) (opcional) health / audit tables
+CREATE TABLE IF NOT EXISTS cron_logs (id uuid PRIMARY KEY DEFAULT gen_random_uuid(), job_name text, status text, metadata jsonb, created_at timestamptz DEFAULT now());
+
+# --- PARTE C: RPCs (reserve / commit / release) - SECURITY DEFINER
+-- NOTE: Estas funções são escritas para serem executadas pelo backend com SERVICE_ROLE_KEY.
+-- 1) reserve_credits: tenta reservar (debit logical) sem alterar profiles.credits ainda.
+CREATE OR REPLACE FUNCTION reserve_credits(p_user_id uuid, p_amount int, p_ttl_seconds int)
+RETURNS TABLE(success boolean, reservation_id uuid, expires_at timestamptz) 
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_profile_row RECORD;
+  v_expires timestamptz := now() + (p_ttl_seconds || ' seconds')::interval;
+  v_res_id uuid;
+BEGIN
+  -- lock profile row to read credits
+  SELECT id, credits INTO v_profile_row FROM profiles WHERE id = p_user_id FOR UPDATE;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT false, NULL::uuid, NULL::timestamptz;
+    RETURN;
+  END IF;
+  IF v_profile_row.credits < p_amount THEN
+    RETURN QUERY SELECT false, NULL::uuid, NULL::timestamptz;
+    RETURN;
+  END IF;
+  -- create reservation (not touching profiles yet)
+  INSERT INTO credit_reservations (user_id, reserved_amount, status, expire_at)
+  VALUES (p_user_id, p_amount, 'reserved', v_expires)
+  RETURNING id INTO v_res_id;
+  RETURN QUERY SELECT true, v_res_id, v_expires;
+END;
+$$;
+
+-- 2) commit_reservation: aplica débito atômico e marca reservation como committed
+CREATE OR REPLACE FUNCTION commit_reservation(p_reservation_id uuid)
+RETURNS TABLE(success boolean, remaining_credits int) 
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+DECLARE
+  v_res RECORD;
+  v_new_credits int;
+BEGIN
+  SELECT * INTO v_res FROM credit_reservations WHERE id = p_reservation_id FOR UPDATE;
+  IF NOT FOUND OR v_res.status != 'reserved' THEN
+    RETURN QUERY SELECT false, NULL;
+    RETURN;
+  END IF;
+  -- atomic debit
+  UPDATE profiles
+  SET credits = credits - v_res.reserved_amount
+  WHERE id = v_res.user_id AND credits >= v_res.reserved_amount
+  RETURNING credits INTO v_new_credits;
+  IF NOT FOUND THEN
+    RETURN QUERY SELECT false, NULL;
+    RETURN;
+  END IF;
+  UPDATE credit_reservations SET status='committed' WHERE id = p_reservation_id;
+  RETURN QUERY SELECT true, v_new_credits;
+END;
+$$;
+
+-- 3) release_reservation: cancela a reserva sem debitar (ex.: erro)
+CREATE OR REPLACE FUNCTION release_reservation(p_reservation_id uuid)
+RETURNS TABLE(success boolean) 
+LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  UPDATE credit_reservations
+  SET status = 'released'
+  WHERE id = p_reservation_id AND status = 'reserved';
+  IF FOUND THEN
+    RETURN QUERY SELECT true;
+  ELSE
+    RETURN QUERY SELECT false;
+  END IF;
+END;
+$$;
+
+-- 4) expire_old_reservations: helper (cron) marca expired
+CREATE OR REPLACE FUNCTION expire_old_reservations()
+RETURNS void LANGUAGE plpgsql SECURITY DEFINER AS $$
+BEGIN
+  UPDATE credit_reservations
+  SET status = 'expired'
+  WHERE status = 'reserved' AND expire_at < now();
+END;
+$$;
+
+# --- PARTE D: Express /api/analyze (arquivo ready-to-paste)
+# Dependências: express, node-fetch/axios, cheerio, crypto, better-sqlite3, @supabase/supabase-js
+# Assumptions: backend roda com SUPABASE_SERVICE_ROLE_KEY e SUPABASE_URL env vars.
+
+const express = require('express');
+const axios = require('axios');
+const cheerio = require('cheerio');
+const crypto = require('crypto');
+const Database = require('better-sqlite3');
+const { createClient } = require('@supabase/supabase-js');
+
+const app = express();
+app.use(express.json());
+
+// ENV
+const SUPABASE_URL = process.env.SUPABASE_URL;
+const SUPABASE_SERVICE_ROLE_KEY = process.env.SUPABASE_SERVICE_ROLE_KEY;
+const RESERVATION_TTL_SECONDS = parseInt(process.env.RESERVATION_TTL_SECONDS || '600', 10);
+
+// clients
+const supabase = createClient(SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY);
+const cacheDb = new Database(process.env.SQLITE_PATH || './cache.db');
+
+// ensure sqlite tables
+cacheDb.exec(`
+CREATE TABLE IF NOT EXISTS scrape_cache (
+  url_hash TEXT PRIMARY KEY,
+  url TEXT,
+  data TEXT,
+  source TEXT,
+  created_at INTEGER DEFAULT (strftime('%s','now'))
+);
+`);
+
+// helpers
+function sha16(url) {
+  return crypto.createHash('sha256').update(url).digest('hex').slice(0,16);
+}
+function normalizeUrl(u) {
+  try {
+    const parsed = new URL(u.trim());
+    parsed.hash = '';
+    return parsed.toString();
+  } catch (e) {
+    return null;
+  }
+}
+async function checkLocalCache(url_hash) {
+  const row = cacheDb.prepare('SELECT data, source, created_at FROM scrape_cache WHERE url_hash = ?').get(url_hash);
+  if (!row) return null;
+  return { data: JSON.parse(row.data), source: row.source };
+}
+function setLocalCache(url_hash, url, data, source='http-basic') {
+  cacheDb.prepare('INSERT OR REPLACE INTO scrape_cache (url_hash, url, data, source, created_at) VALUES (?, ?, ?, ?, strftime(\'%s\', \'now\'))').run(url_hash, url, JSON.stringify(data), source);
+}
+
+// scraper (timeout 10s, retry 1x, user-agent rotativo)
+const USER_AGENTS = [
+  'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 Chrome/120 Safari/537.36',
+  'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 Safari/605.1.15',
+  'Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 Chrome/120 Safari/537.36'
+];
+async function httpScrape(url) {
+  const timeout = 10000;
+  let attempts = 0;
+  let lastErr;
+  while (attempts < 2) { // 1 retry
+    attempts++;
+    try {
+      const ua = USER_AGENTS[Math.floor(Math.random()*USER_AGENTS.length)];
+      const res = await axios.get(url, { timeout, headers: { 'User-Agent': ua, 'Accept-Language': 'pt-BR,pt;q=0.9' } });
+      const $ = cheerio.load(res.data);
+      const title = $('h1').first().text().trim() || $('title').text().trim() || null;
+      const priceMatch = res.data.match(/R\$[\s]*([\d.,]+)/);
+      const price = priceMatch ? priceMatch[1] : null;
+      return { title, price, rawHtmlSnippet: $('meta[name="description"]').attr('content') || null };
+    } catch (err) {
+      lastErr = err;
+      // backoff 2s before retry
+      if (attempts < 2) await new Promise(r => setTimeout(r, 2000));
+    }
+  }
+  throw lastErr;
+}
+
+// circuit-breaker simple per-url (in-memory) — resets on success
+const circuitFailures = {}; // { url_hash: {fails: int, lastFailAt: ts} }
+function circuitRecordFailure(url_hash) {
+  const s = circuitFailures[url_hash] || { fails: 0, lastFailAt: 0 };
+  s.fails += 1; s.lastFailAt = Date.now();
+  circuitFailures[url_hash] = s;
+}
+function circuitShouldFallback(url_hash) {
+  const s = circuitFailures[url_hash];
+  return s && s.fails >= 3;
+}
+function circuitReset(url_hash) { delete circuitFailures[url_hash]; }
+
+// API
+app.post('/api/analyze', async (req, res) => {
+  try {
+    const token = req.headers.authorization?.replace('Bearer ', '');
+    if (!token) return res.status(401).json({ success:false, error:'missing token' });
+
+    // verify token with Supabase (public method)
+    const { data: { user }, error: userErr } = await supabase.auth.getUser(token);
+    if (userErr || !user) return res.status(401).json({ success:false, error:'invalid token' });
+
+    const rawUrl = req.body.url;
+    const normalized = normalizeUrl(rawUrl);
+    if (!normalized) return res.status(400).json({ success:false, error:'invalid url' });
+
+    const url_hash = sha16(normalized);
+
+    // 1) local cache
+    const local = await checkLocalCache(url_hash);
+    if (local) {
+      return res.json({ success:true, analysis: local.data, credits_remaining: (await getProfileCredits(user.id)), cached:true });
+    }
+
+    // 2) remote cache (Supabase)
+    const { data: cacheRow } = await supabase.from('analysis_cache').select('offer_data').eq('url_hash', url_hash).maybeSingle();
+    if (cacheRow && cacheRow.offer_data) {
+      setLocalCache(url_hash, normalized, cacheRow.offer_data, 'postgres_promote');
+      return res.json({ success:true, analysis: cacheRow.offer_data, credits_remaining: (await getProfileCredits(user.id)), cached:true });
+    }
+
+    // 3) Circuit-breaker check
+    if (circuitShouldFallback(url_hash)) {
+      // fallback: return last remote cache if exists, else error
+      if (cacheRow && cacheRow.offer_data) {
+        return res.json({ success:true, analysis: cacheRow.offer_data, credits_remaining: (await getProfileCredits(user.id)), cached:true, note:'circuit-fallback' });
+      } else {
+        return res.status(503).json({ success:false, error:'service temporarily unavailable' });
+      }
+    }
+
+    // 4) Reserve credits BEFORE scraping
+    const { data: reserveRes, error: reserveErr } = await supabase.rpc('reserve_credits', { p_user_id: user.id, p_amount: 1, p_ttl_seconds: RESERVATION_TTL_SECONDS });
+    if (reserveErr || !reserveRes || reserveRes.length === 0 || !reserveRes[0].success) {
+      return res.status(402).json({ success:false, error:'insufficient credits' });
+    }
+    const reservation_id = reserveRes[0].reservation_id;
+
+    // 5) create analysis_request pending
+    const { error: insertErr } = await supabase.from('analysis_requests').insert({
+      user_id: user.id,
+      url: normalized,
+      url_hash,
+      status: 'pending',
+      credits_reserved: 1
+    });
+    if (insertErr) {
+      // release reservation and return
+      await supabase.rpc('release_reservation', { p_reservation_id: reservation_id });
+      return res.status(500).json({ success:false, error:'failed to register request' });
+    }
+
+    // 6) perform scraping with retry/backoff and circuit updates
+    let scraped;
+    try {
+      scraped = await httpScrape(normalized);
+      circuitReset(url_hash);
+    } catch (scrErr) {
+      circuitRecordFailure(url_hash);
+      // release reservation
+      await supabase.rpc('release_reservation', { p_reservation_id: reservation_id });
+      // mark request failed
+      await supabase.from('analysis_requests').update({ status:'failed', updated_at: new Date().toISOString() }).eq('url_hash', url_hash).limit(1);
+      return res.status(502).json({ success:false, error:'scraping_failed' });
+    }
+
+    // 7) scoring / analysis (MVP heuristics)
+    const base = 50;
+    let score = base;
+    if (scraped.title) score += 20;
+    if (scraped.price) score += 30;
+    if (score > 100) score = 100;
+    const analysis = { url: normalized, score, title: scraped.title || null, price: scraped.price || null, source: 'http-basic', timestamp: new Date().toISOString() };
+
+    // 8) save to caches (local + remote)
+    setLocalCache(url_hash, normalized, analysis, 'http-basic');
+    await supabase.from('analysis_cache').upsert({ url_hash, url: normalized, offer_data: analysis, source: 'http-basic', created_at: new Date().toISOString() });
+
+    // 9) commit reservation (atomic debit)
+    const { data: commitRes, error: commitErr } = await supabase.rpc('commit_reservation', { p_reservation_id: reservation_id });
+    if (commitErr || !commitRes || commitRes.length === 0 || !commitRes[0].success) {
+      // rollback: release reservation (try)
+      await supabase.rpc('release_reservation', { p_reservation_id: reservation_id }).catch(()=>{});
+      return res.status(500).json({ success:false, error:'commit_failed' });
+    }
+
+    // 10) update analysis_request to success + save result
+    await supabase.from('analysis_requests').update({ status:'success', result: analysis, updated_at: new Date().toISOString() }).eq('url_hash', url_hash).limit(1);
+
+    // get remaining credits
+    const remaining_credits = commitRes[0].remaining_credits;
+
+    return res.json({ success:true, analysis, credits_remaining: remaining_credits, cached:false });
+
+  } catch (err) {
+    console.error('analyze error', err);
+    return res.status(500).json({ success:false, error:'internal_error' });
+  }
+});
+
+// helper to get profile credits (service role)
+async function getProfileCredits(userId) {
+  const { data } = await supabase.from('profiles').select('credits').eq('id', userId).single();
+  return data?.credits ?? 0;
+}
+
+module.exports = app;
+
+# --- PARTE E: Worker scraper (separar em worker/scraper.js)
+# Worker: process queue (in-memory or Redis queue) to do heavier scrapes later, same settings: timeout 10s, retry 1x, UA rotativo, circuit-breaker 3 fails.
+# Payload: {url, user_id, url_hash, analysis_request_id}
+const { parentPort } = require('worker_threads');
+// Reuse httpScrape and helpers from above (or import service)
+parentPort.on('message', async (job) => {
+  try {
+    const result = await httpScrape(job.url);
+    parentPort.postMessage({ success:true, result });
+  } catch (err) {
+    parentPort.postMessage({ success:false, error: err.message });
+  }
+});
+
+# --- PARTE F: Checklist E2E (concorrência incluída)
+1. Preparar: criar usuário com >=2 créditos. (supabase auth / profiles)
+2. Teste básico: chamar POST /api/analyze com token JWT e URL válida → expect 200, success=true, credits_remaining decreased by 1.
+3. Teste cache: repetir mesma URL (mesma conta) → expect cached=true and credits not decreased.
+4. Teste concorrência: disparar 5 requests paralelas com mesmo token e mesma URL:
+   - Apenas 1 deve consumir crédito (others hit cache or prevented by UNIQUE + reservation logic).
+   - No máximo n créditos consumidos conforme calls únicas. Verificar analysis_requests unique index.
+5. Teste falha scrape: simular URL que timeoute → expect reservation released and credits unchanged.
+6. Teste circuit-breaker: forçar 3 falhas em sequência → subsequent requests fallback to remote cache or 503.
+7. Cron: executar function expire_old_reservations() → reservations expiradas passam para status expired.
+8. Security: confirmar que nenhuma rota de RPC executa com anon key (usar SERVICE_ROLE_KEY no backend).
+9. Load test leve: 50 análises sequenciais únicas → medir p95 latência < 8s (sem Puppeteer).
+10. Observability: logs mostram reservation_id, user_id, url_hash, result.status.
+
+# --- PARTE G: Notas operacionais e validações aplicadas
+- `url_hash` = sha256(url_normalized).slice(0,16) — usa mesma função front & back (garantir lib no frontend).
+- Todos os RPCs criados com `SECURITY DEFINER`. Backend usa `SUPABASE_SERVICE_ROLE_KEY`.
+- Reserva default TTL: 600s (5–15min especificado; recomendado 600).
+- Circuit-breaker simples em memória — para escala, migrar para Redis.
+- Se preferir Firecrawl como fallback, adicionar step após httpScrape excepcional.
+- Garantir RLS em `profiles` e `analysis_requests` (apenas leitura limitada no frontend); somente backend Service Role realiza inserts/updates críticos.
+- Testes corrigidos: release/commit chamadas em todos os caminhos de erro.
+
+# --- PARTE H: Checklist para colar no SONET e executar
+1. Adicionar envs no projeto (SUPABASE_SERVICE_ROLE_KEY etc).
+2. Colar SQL (PARTE B) e executar no Supabase SQL Editor.
+3. Deploy do backend Express com o código de PARTE D.
+4. Iniciar cron job para expire_old_reservations (p.ex. diária) e worker pool.
+5. Rodar Checklist E2E.
+
+### FIM DO PROMPT SONET

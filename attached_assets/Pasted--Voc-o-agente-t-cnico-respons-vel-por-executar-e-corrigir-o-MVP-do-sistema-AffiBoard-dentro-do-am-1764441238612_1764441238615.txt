@@ -1,0 +1,218 @@
+
+Você é o agente técnico responsável por executar e corrigir o MVP do sistema AffiBoard dentro do ambiente Replit.
+
+A seguir está o contexto completo e o que você precisa fazer exatamente para deixar o MVP funcionando.
+
+🔧 OBJETIVO PRINCIPAL
+
+Corrigir, ajustar e ativar o MVP completo do AffiBoard, garantindo que:
+
+1. O backend Express rode na porta 5000
+
+
+2. O Vite frontend abra corretamente (sem bloqueio do host)
+
+
+3. A comunicação com o Supabase funcione
+
+
+4. O débito de créditos e autenticação funcionem
+
+
+5. As rotas /api/analyze-mvp, /api/credits, /api/history funcionem
+
+
+6. A análise via Edge Function seja substituída pela rota Express local
+
+
+7. Todo o app seja acessível pelo domínio público do Replit (sem erro de host)
+
+
+
+
+---
+
+🟩 1 — APLIQUE ESTE PATCH NO vite.config.ts
+
+Corrija o erro de host bloqueado adicionando allowedHosts e configuração de proxy.
+
+Faça isso:
+
+abrir vite.config.ts
+
+adicionar:
+
+
+server: {
+  host: "0.0.0.0",
+  port: 5173,
+  allowedHosts: "all",
+  proxy: {
+    "/api": {
+      target: "http://localhost:5000",
+      changeOrigin: true,
+      secure: false,
+      ws: true,
+      timeout: 100000
+    }
+  }
+},
+
+Remover qualquer duplicidade
+
+Garantir que isso apareça dentro de defineConfig({ ... })
+
+
+Depois, aplique o diff.
+
+
+---
+
+🟩 2 — CRIAR OU ATUALIZAR AS ROTAS DO BACKEND (server/routes.ts)
+
+Ative as 3 rotas do MVP:
+
+✔ /api/analyze-mvp
+
+Recebe { url }
+
+Valida JWT Supabase via header
+
+Chama uma análise fake (temporária) para teste
+→ Exemplo de resposta:
+
+
+{
+  "risk_score": 27,
+  "conversion_score": 74,
+  "recommendation": "Baixa concorrência, boa copy, página rápida"
+}
+
+✔ /api/credits
+
+Retorna os créditos do usuário (consulta no Supabase)
+
+
+✔ /api/history
+
+Retorna o histórico de análises do usuário
+(consulta analysis_logs)
+
+
+
+---
+
+🟩 3 — FRONTEND: AJUSTAR analyzeOffer()
+
+No arquivo client/src/lib/api.ts:
+
+Trocar a chamada antiga:
+
+${import.meta.env.VITE_SUPABASE_URL}/functions/v1/analyze-offer-index-ts
+
+Por:
+
+"/api/analyze-mvp"
+
+Usando fetch normal.
+
+
+---
+
+🟩 4 — AJUSTAR CORS E RAW JSON NO BACKEND
+
+Garantir que index.ts tenha:
+
+express.json() configurado
+
+middleware de logs ativo
+
+Vite dev server em modo middleware
+
+Servir estático em produção
+
+
+Só confirmar que tudo está igual ao arquivo atual.
+
+
+---
+
+🟩 5 — EXECUTAR TESTE AUTOMATIZADO (REPLIT)
+
+Rodar o seguinte script criado aqui mesmo:
+
+Crie test-mvp.ts com o seguinte conteúdo:
+
+import fetch from "node-fetch";
+
+(async () => {
+  const base = "https://<INSIRA-O-SEU-DOMINIO-REPLIT>.replit.dev";
+
+  console.log("🔎 Testando API /api/analyze-mvp...");
+  const res1 = await fetch(base + "/api/analyze-mvp", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({ url: "https://exemplo.com" })
+  });
+  console.log(await res1.text());
+
+  console.log("🔎 Testando API /api/credits...");
+  const res2 = await fetch(base + "/api/credits");
+  console.log(await res2.text());
+})();
+
+Depois execute:
+
+node test-mvp.ts
+
+Se todas as respostas retornarem corretamente → MVP OK.
+
+
+---
+
+🟩 6 — PASSOS QUE VOCÊ (AGENTE) DEVE EXECUTAR EM ORDEM
+
+1. Aplicar patch no vite.config.ts
+
+
+2. Criar e aplicar as rotas no backend
+
+
+3. Atualizar client/src/lib/api.ts
+
+
+4. Rodar npm run dev
+
+
+5. Testar se o domínio público acessa o site
+
+
+6. Caso ainda bloqueie host, imprimir o host exato e adicionar no Vite
+
+
+7. Rodar o script de teste do MVP
+
+
+8. Me retornar:
+
+logs
+
+diffs
+
+confirmação de funcionamento
+
+
+
+
+
+---
+
+🟩 7 — APÓS FINALIZAR, RESPONDER COM:
+
+MVP ATIVO
+Rotas funcionando ✔
+Supabase OK ✔
+Credits system ✔
+Analyze MVP ✔
+Domínio habilitado ✔
+
